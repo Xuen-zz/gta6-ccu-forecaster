@@ -41,30 +41,34 @@ def is_rolling_unlock(unlock_str: str) -> bool:
 
 
 def weighted_quantile(values: list[float], weights: list[float], quantiles: list[float]) -> list[float]:
-    """Computes exact weighted empirical quantiles from a continuous sample distribution."""
-    sorter = sorted(range(len(values)), key=lambda k: values[k])
-    sorted_vals = [values[i] for i in sorter]
-    sorted_weights = [weights[i] for i in sorter]
-
-    total_w = sum(sorted_weights)
+    """Computes midpoint-interpolated weighted empirical quantiles from sample values."""
+    pairs = sorted(zip(values, weights), key=lambda item: item[0])
+    total_w = sum(w for _, w in pairs)
     if total_w <= 0.0:
+        n = len(pairs)
+        pairs = [(v, 1.0 / n) for v, _ in pairs]
         total_w = 1.0
-        sorted_weights = [1.0 / len(values)] * len(values)
 
-    cum_w = []
-    curr = 0.0
-    for w in sorted_weights:
-        curr += w
-        cum_w.append(curr / total_w)
+    mid_cums: list[tuple[float, float]] = []
+    acc = 0.0
+    for val, w in pairs:
+        mid_cums.append(((acc + 0.5 * w) / total_w, val))
+        acc += w
 
     res = []
     for q in quantiles:
-        idx = 0
-        while idx < len(cum_w) and cum_w[idx] < q:
-            idx += 1
-        if idx >= len(cum_w):
-            idx = len(cum_w) - 1
-        res.append(sorted_vals[idx])
+        if q <= mid_cums[0][0]:
+            res.append(mid_cums[0][1])
+        elif q >= mid_cums[-1][0]:
+            res.append(mid_cums[-1][1])
+        else:
+            for k in range(len(mid_cums) - 1):
+                c0, v0 = mid_cums[k]
+                c1, v1 = mid_cums[k + 1]
+                if c0 <= q <= c1:
+                    t = (q - c0) / (c1 - c0) if c1 > c0 else 0.0
+                    res.append(v0 * (1.0 - t) + v1 * t)
+                    break
     return res
 
 
@@ -80,9 +84,12 @@ def forecast_case(case: dict, case_name: str) -> dict:
 
     p1 = max(1.0, float(first_hour.get("viewers", 1.0)))
 
-    # Extract target case context
+    # Extract target case context (console launches roll midnight local unless noted simultaneous)
     notes = str(case.get("notes", ""))
-    target_is_rolling = is_rolling_unlock(notes)
+    game_name = str(case.get("game", {}).get("name", "")).lower()
+    target_is_rolling = is_rolling_unlock(notes) or (
+        "simultaneous" not in notes.lower() and "grand theft auto vi" in game_name
+    )
 
     # Parse and extract launch trajectories from the comparables dataset
     comparables = case.get("comparables", [])
@@ -119,12 +126,12 @@ def forecast_case(case: dict, case_name: str) -> dict:
             ]
         }
 
-    # Similarity weighting: scale distance + console platform + unlock alignment
+    # Similarity weighting: scale distance (alpha=0.75) + console platform + unlock alignment
     log_p1 = math.log(p1)
     weights = []
     for t in trajectories:
         dist_scale = abs(log_p1 - math.log(t["v1"]))
-        w = math.exp(-0.25 * dist_scale)
+        w = math.exp(-0.75 * dist_scale)
 
         # Platform match (consoles vs PC)
         if "PS" in t["platforms"] or "Xbox" in t["platforms"]:
